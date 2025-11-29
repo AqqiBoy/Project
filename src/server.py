@@ -2,13 +2,12 @@
 import asyncio
 import argparse
 
-async def handle_connection(reader, writer):
+async def handle_connection(reader, writer, server_name):
     """
     Handles a single client connection.
     Responds with the server's name.
     """
     addr = writer.get_extra_info('peername')
-    server_name = writer.get_extra_info('server_name')
     print(f"[{server_name}] Received connection from {addr}")
 
     # Read client message (optional, but good practice)
@@ -32,10 +31,9 @@ async def main(name, host, port):
     """
     loop = asyncio.get_running_loop()
     
-    # Pass server_name to the handler via a closure
+    # Pass server_name directly to the handler
     async def server_handler(reader, writer):
-        writer.set_extra_info('server_name', name)
-        await handle_connection(reader, writer)
+        await handle_connection(reader, writer, name)
 
     server = await asyncio.start_server(
         server_handler, host, port)
