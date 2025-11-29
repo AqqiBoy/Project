@@ -1,4 +1,3 @@
-
 import asyncio
 import argparse
 
@@ -8,19 +7,32 @@ async def handle_connection(reader, writer, server_name):
     Responds with the server's name.
     """
     addr = writer.get_extra_info('peername')
-    print(f"[{server_name}] Received connection from {addr}")
+    print(f"[{server_name}] Accepted connection from {addr}")
 
-    # Read client message (optional, but good practice)
-    data = await reader.read(100)
-    message = data.decode()
-    print(f"[{server_name}] Received message: {message!r} from {addr}")
+    try:
+        while True:
+            # Read client message
+            data = await reader.read(100) # Read up to 100 bytes
+            if not data: # Client disconnected
+                break
+            
+            message = data.decode().strip()
+            print(f"[{server_name}] Received message: {message!r} from {addr}")
 
-    # Respond with a unique identifier
-    response = f"Hello from {server_name}\n"
-    print(f"[{server_name}] Sending: {response!r}")
-    writer.write(response.encode())
-    await writer.drain()
+            # Respond with a unique identifier
+            response = f"Hello from {server_name}\n"
+            print(f"[{server_name}] Sending: {response!r}")
+            writer.write(response.encode())
+            await writer.drain()
 
+    except ConnectionResetError:
+        print(f"[{server_name}] Client {addr} disconnected unexpectedly.")
+    except Exception as e:
+        print(f"[{server_name}] Error with client {addr}: {e}")
+    finally:
+        print(f"[{server_name}] Closing connection with {addr}")
+        writer.close()
+        await writer.wait_closed()
 
 
 async def main(name, host, port):
