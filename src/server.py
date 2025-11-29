@@ -21,9 +21,7 @@ async def handle_connection(reader, writer, server_name):
     writer.write(response.encode())
     await writer.drain()
 
-    print(f"[{server_name}] Closing connection with {addr}")
-    writer.close()
-    await writer.wait_closed()
+
 
 async def main(name, host, port):
     """
