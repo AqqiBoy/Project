@@ -14,6 +14,7 @@ SERVER_POOL = [
 ]
 
 HEALTH_CHECK_INTERVAL = 5  # seconds
+WAIT_FOR_BACKEND_TIMEOUT = 30  # seconds to wait for a backend to become healthy
 
 # ============================================================ 
 # PHASE 2 & 3: PLACEHOLDER DATA STRUCTURES
@@ -145,6 +146,22 @@ async def select_backend(exclude=None):
         return chosen, algo
 
 
+async def wait_for_backend(timeout, exclude=None):
+    """
+    Wait for up to `timeout` seconds for a backend to become available.
+    Returns (server, algo) or None.
+    """
+    start = asyncio.get_running_loop().time()
+    while True:
+        selection = await select_backend(exclude)
+        if selection:
+            return selection
+        elapsed = asyncio.get_running_loop().time() - start
+        if elapsed >= timeout:
+            return None
+        await asyncio.sleep(min(HEALTH_CHECK_INTERVAL, timeout - elapsed))
+
+
 async def handle_client(client_reader, client_writer):
     """
     Handles a new client connection by forwarding it to a backend server.
@@ -156,20 +173,25 @@ async def handle_client(client_reader, client_writer):
     selection = await select_backend(tried_servers)
 
     if not selection:
-        print("LB: No active backend servers available.")
-        client_writer.close()
-        await client_writer.wait_closed()
-        return
+        print("LB: No active backend servers available. Waiting for a backend to recover...")
+        selection = await wait_for_backend(WAIT_FOR_BACKEND_TIMEOUT)
+        if not selection:
+            print("LB: Timeout waiting for backend. Closing client.")
+            client_writer.close()
+            await client_writer.wait_closed()
+            return
 
     selected_server, selected_algo = selection
     backend_host, backend_port = None, None
     backend_reader, backend_writer = None, None
+    connected_backend = None
 
     while selected_server:
         backend_host, backend_port = selected_server
         print(f"LB: Forwarding {client_addr} to {backend_host}:{backend_port} ({selected_algo})")
         try:
             backend_reader, backend_writer = await asyncio.open_connection(backend_host, backend_port)
+            connected_backend = (backend_host, backend_port)
             async with active_servers_lock:
                 CONNECTION_COUNT[(backend_host, backend_port)] += 1
             print(f"LB: Connection count for {backend_host}:{backend_port}: {CONNECTION_COUNT[(backend_host, backend_port)]}")
@@ -184,10 +206,12 @@ async def handle_client(client_reader, client_writer):
             tried_servers.add(selected_server)
             selection = await select_backend(tried_servers)
             if not selection:
-                selected_server = None
-                selected_algo = SCHEDULING_ALGORITHM
-            else:
-                selected_server, selected_algo = selection
+                print("LB: No alternative backend immediately available. Waiting for backend to recover...")
+                selection = await wait_for_backend(WAIT_FOR_BACKEND_TIMEOUT)
+            if not selection:
+                print("LB: Timeout waiting for backend. Closing client.")
+                break
+            selected_server, selected_algo = selection
             continue
 
         # Connected: start piping and monitor for mid-stream backend failure.
@@ -219,13 +243,18 @@ async def handle_client(client_reader, client_writer):
             backend_writer.close()
             await backend_writer.wait_closed()
         async with active_servers_lock:
-            if (backend_host, backend_port) in CONNECTION_COUNT and CONNECTION_COUNT[(backend_host, backend_port)] > 0:
-                CONNECTION_COUNT[(backend_host, backend_port)] -= 1
+            if connected_backend and connected_backend in CONNECTION_COUNT and CONNECTION_COUNT[connected_backend] > 0:
+                CONNECTION_COUNT[connected_backend] -= 1
+        connected_backend = None
+        backend_reader, backend_writer = None, None
 
         tried_servers.add(selected_server)
         selection = await select_backend(tried_servers)
         if not selection:
-            print("LB: No alternative backend available for failover.")
+            print("LB: No alternative backend available immediately. Waiting for backend to recover...")
+            selection = await wait_for_backend(WAIT_FOR_BACKEND_TIMEOUT)
+        if not selection:
+            print("LB: Timeout waiting for backend during failover. Closing client.")
             selected_server = None
         else:
             selected_server, selected_algo = selection
@@ -235,8 +264,8 @@ async def handle_client(client_reader, client_writer):
         backend_writer.close()
         await backend_writer.wait_closed()
     async with active_servers_lock:
-        if backend_host and backend_port and (backend_host, backend_port) in CONNECTION_COUNT and CONNECTION_COUNT[(backend_host, backend_port)] > 0:
-            CONNECTION_COUNT[(backend_host, backend_port)] -= 1
+        if connected_backend and connected_backend in CONNECTION_COUNT and CONNECTION_COUNT[connected_backend] > 0:
+            CONNECTION_COUNT[connected_backend] -= 1
 
     if client_writer:
         client_writer.close()
