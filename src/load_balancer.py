@@ -1,5 +1,5 @@
+import argparse
 import asyncio
-from itertools import cycle
 
 # ============================================================ 
 # PHASE 1: CORE DATA STRUCTURES
@@ -14,10 +14,6 @@ SERVER_POOL = [
 ]
 
 HEALTH_CHECK_INTERVAL = 5  # seconds
-
-# Use itertools.cycle for simple round-robin
-server_iterator = cycle(SERVER_POOL)
-
 
 # ============================================================ 
 # PHASE 2 & 3: PLACEHOLDER DATA STRUCTURES
@@ -36,33 +32,61 @@ CONNECTION_COUNT = {server: 0 for server in SERVER_POOL}
 # Example: SESSION_MAP = {'<client_ip>:<client_port>': '<backend_addr>'}
 SESSION_MAP = {}
 
+# Scheduler selection
+SCHEDULING_ALGORITHM = "auto"  # "auto", "round-robin", or "least-connections"
+round_robin_index = 0  # shared index used for round-robin and tie-breaking
+
+
+async def check_server_health(server):
+    """
+    Attempt to connect to a backend to determine health.
+    """
+    host, port = server
+    try:
+        _, writer = await asyncio.wait_for(
+            asyncio.open_connection(host, port), timeout=1
+        )
+        writer.close()
+        await writer.wait_closed()
+        return True
+    except (asyncio.TimeoutError, ConnectionRefusedError):
+        return False
+    except Exception as e:
+        print(f"LB: Error checking health of {server}: {e}")
+        return False
+
+
+async def refresh_active_servers():
+    """
+    Run a full health check pass and update ACTIVE_SERVERS.
+    """
+    global ACTIVE_SERVERS
+    healthy_servers = []
+    for server in SERVER_POOL:
+        is_healthy = await check_server_health(server)
+        if is_healthy:
+            healthy_servers.append(server)
+            print(f"LB: Server {server} is healthy.")
+        else:
+            print(f"LB: Server {server} is unhealthy.")
+        # Reset connection counts for unhealthy servers to avoid stale skew.
+        if not is_healthy:
+            CONNECTION_COUNT[server] = 0
+        else:
+            CONNECTION_COUNT.setdefault(server, 0)
+
+    async with active_servers_lock:
+        ACTIVE_SERVERS = healthy_servers
+        print(f"LB: Active servers updated: {ACTIVE_SERVERS}")
+
 
 async def perform_health_checks():
-    global ACTIVE_SERVERS
+    """
+    Periodically refresh ACTIVE_SERVERS to reflect current backend health.
+    """
     while True:
         print("LB: Performing health checks...")
-        healthy_servers = []
-        for server in SERVER_POOL:
-            host, port = server
-            try:
-                # Attempt to open a connection to the backend server
-                # Set a timeout for the connection attempt
-                _, writer = await asyncio.wait_for(
-                    asyncio.open_connection(host, port), timeout=1
-                )
-                writer.close()
-                await writer.wait_closed()
-                healthy_servers.append(server)
-                print(f"LB: Server {server} is healthy.")
-            except (asyncio.TimeoutError, ConnectionRefusedError):
-                print(f"LB: Server {server} is unhealthy.")
-            except Exception as e:
-                print(f"LB: Error checking health of {server}: {e}")
-        
-        async with active_servers_lock:
-            ACTIVE_SERVERS = healthy_servers
-            print(f"LB: Active servers: {ACTIVE_SERVERS}")
-        
+        await refresh_active_servers()
         await asyncio.sleep(HEALTH_CHECK_INTERVAL)
 
 async def pipe_data(reader, writer, peer_name, direction):
@@ -87,6 +111,40 @@ async def pipe_data(reader, writer, peer_name, direction):
     # The writers will be closed by handle_client.
 
 
+async def select_backend(exclude=None):
+    """
+    Select a backend server based on the configured scheduling algorithm.
+    exclude: set of servers already tried for this client (for failover).
+    """
+    global round_robin_index
+    exclude = exclude or set()
+
+    async with active_servers_lock:
+        candidates = [s for s in ACTIVE_SERVERS if s not in exclude]
+        if not candidates:
+            return None
+
+        def choose_algorithm():
+            if SCHEDULING_ALGORITHM != "auto":
+                return SCHEDULING_ALGORITHM
+            if len(candidates) <= 1:
+                return "round-robin"
+            counts = [CONNECTION_COUNT.get(s, 0) for s in candidates]
+            return "round-robin" if len(set(counts)) == 1 else "least-connections"
+
+        algo = choose_algorithm()
+
+        if algo == "least-connections":
+            min_connections = min(CONNECTION_COUNT.get(s, 0) for s in candidates)
+            least_connected = [s for s in candidates if CONNECTION_COUNT.get(s, 0) == min_connections]
+            chosen = least_connected[round_robin_index % len(least_connected)]
+        else:  # round-robin
+            chosen = candidates[round_robin_index % len(candidates)]
+
+        round_robin_index += 1
+        return chosen, algo
+
+
 async def handle_client(client_reader, client_writer):
     """
     Handles a new client connection by forwarding it to a backend server.
@@ -94,61 +152,45 @@ async def handle_client(client_reader, client_writer):
     client_addr = client_writer.get_extra_info('peername')
     print(f"LB: Accepted connection from {client_addr}")
 
-    # ============================================================ 
-    # PHASE 2: Least-Connections Scheduling
-    # ============================================================ 
+    tried_servers = set()
+    selection = await select_backend(tried_servers)
+
+    if not selection:
+        print("LB: No active backend servers available.")
+        client_writer.close()
+        await client_writer.wait_closed()
+        return
+
+    selected_server, selected_algo = selection
     backend_host, backend_port = None, None
-    async with active_servers_lock:
-        if not ACTIVE_SERVERS:
-            print("LB: No active backend servers available.")
-            client_writer.close()
-            await client_writer.wait_closed()
-            return
-        
-        # Find the server(s) with the least connections among active servers
-        min_connections = float('inf')
-        least_connected_servers = []
-
-        for server in ACTIVE_SERVERS:
-            count = CONNECTION_COUNT.get(server, 0)
-            if count < min_connections:
-                min_connections = count
-                least_connected_servers = [server]
-            elif count == min_connections:
-                least_connected_servers.append(server)
-        
-        # Use round-robin among the least connected servers
-        # This creates a new iterator each time, ensuring fairness among them
-        # (backend_host, backend_port) = next(cycle(least_connected_servers))
-        # This is not ideal as cycle creates a new iterator each time and loses state.
-        # For simplicity and given the small number of servers, picking the first is acceptable for now.
-        # A more robust solution would require a dedicated iterator for least_connected_servers
-        # or more complex state management.
-        (backend_host, backend_port) = least_connected_servers[0] # Simplistic for now.
-
-    print(f"LB: Forwarding {client_addr} to {backend_host}:{backend_port} (Least-Connections)")
-    
     backend_reader, backend_writer = None, None
-    try:
-        # Establish connection to the selected backend server
-        backend_reader, backend_writer = await asyncio.open_connection(backend_host, backend_port)
-        async with active_servers_lock:
-            CONNECTION_COUNT[(backend_host, backend_port)] += 1
-        print(f"LB: Connection count for {backend_host}:{backend_port}: {CONNECTION_COUNT[(backend_host, backend_port)]}")
 
-    except ConnectionRefusedError:
-        print(f"LB: Connection refused by backend server {backend_host}:{backend_port}.")
-        client_writer.close()
-        await client_writer.wait_closed()
-        return
-    except Exception as e:
-        print(f"LB: Failed to connect to backend {backend_host}:{backend_port}: {e}")
-        client_writer.close()
-        await client_writer.wait_closed()
-        return
+    while selected_server:
+        backend_host, backend_port = selected_server
+        print(f"LB: Forwarding {client_addr} to {backend_host}:{backend_port} ({selected_algo})")
+        try:
+            backend_reader, backend_writer = await asyncio.open_connection(backend_host, backend_port)
+            async with active_servers_lock:
+                CONNECTION_COUNT[(backend_host, backend_port)] += 1
+            print(f"LB: Connection count for {backend_host}:{backend_port}: {CONNECTION_COUNT[(backend_host, backend_port)]}")
+        except ConnectionRefusedError:
+            print(f"LB: Connection refused by backend server {backend_host}:{backend_port}. Trying another.")
+            backend_reader, backend_writer = None, None
+        except Exception as e:
+            print(f"LB: Failed to connect to backend {backend_host}:{backend_port}: {e}. Trying another.")
+            backend_reader, backend_writer = None, None
 
-    try:
-        # Create tasks for bidirectional data piping
+        if backend_reader is None or backend_writer is None:
+            tried_servers.add(selected_server)
+            selection = await select_backend(tried_servers)
+            if not selection:
+                selected_server = None
+                selected_algo = SCHEDULING_ALGORITHM
+            else:
+                selected_server, selected_algo = selection
+            continue
+
+        # Connected: start piping and monitor for mid-stream backend failure.
         client_to_backend = asyncio.create_task(
             pipe_data(client_reader, backend_writer, client_addr, "Client -> Backend")
         )
@@ -156,39 +198,63 @@ async def handle_client(client_reader, client_writer):
             pipe_data(backend_reader, client_writer, (backend_host, backend_port), "Backend -> Client")
         )
 
-        # Wait for both tasks to complete. This ensures that the connection remains open
-        # as long as data is flowing in either direction.
-        # Use return_when=asyncio.ALL_COMPLETED to wait for both pipes to finish naturally.
-        # If the client or backend closes their side, that pipe_data will finish.
-        # When both finish, then the overall connection can be closed.
-        await asyncio.gather(client_to_backend, backend_to_client)
+        done, pending = await asyncio.wait(
+            {client_to_backend, backend_to_client},
+            return_when=asyncio.FIRST_COMPLETED,
+        )
 
-    except asyncio.CancelledError:
-        # This can happen if the handle_client task itself is cancelled.
-        pass
-    except Exception as e:
-        print(f"LB: Error during data piping for {client_addr}: {e}")
-    finally:
-        # Ensure both client and backend writers are closed
-        if client_writer:
-            client_writer.close()
-            await client_writer.wait_closed()
+        # If client side finished first, break and close everything.
+        if client_to_backend in done:
+            backend_to_client.cancel()
+            await asyncio.gather(backend_to_client, return_exceptions=True)
+            break
+
+        # Backend finished first: attempt mid-stream failover.
+        client_to_backend.cancel()
+        await asyncio.gather(client_to_backend, return_exceptions=True)
+        print(f"LB: Backend {backend_host}:{backend_port} closed mid-stream for {client_addr}; attempting failover.")
+
+        # Clean up current backend and decrement count.
         if backend_writer:
             backend_writer.close()
             await backend_writer.wait_closed()
-
         async with active_servers_lock:
             if (backend_host, backend_port) in CONNECTION_COUNT and CONNECTION_COUNT[(backend_host, backend_port)] > 0:
                 CONNECTION_COUNT[(backend_host, backend_port)] -= 1
-        print(f"LB: Connection count for {backend_host}:{backend_port}: {CONNECTION_COUNT.get((backend_host, backend_port), 0)}")
-    
+
+        tried_servers.add(selected_server)
+        selection = await select_backend(tried_servers)
+        if not selection:
+            print("LB: No alternative backend available for failover.")
+            selected_server = None
+        else:
+            selected_server, selected_algo = selection
+
+    # Final cleanup and count decrement for the last backend used.
+    if backend_writer:
+        backend_writer.close()
+        await backend_writer.wait_closed()
+    async with active_servers_lock:
+        if backend_host and backend_port and (backend_host, backend_port) in CONNECTION_COUNT and CONNECTION_COUNT[(backend_host, backend_port)] > 0:
+            CONNECTION_COUNT[(backend_host, backend_port)] -= 1
+
+    if client_writer:
+        client_writer.close()
+        await client_writer.wait_closed()
+
     print(f"LB: Closed connection for {client_addr}")
 
 
-async def main(host, port):
+async def main(host, port, algorithm):
     """
     Starts the Load Balancer server.
     """
+    global SCHEDULING_ALGORITHM
+    SCHEDULING_ALGORITHM = algorithm
+
+    print(f"LB: Initializing with algorithm={SCHEDULING_ALGORITHM}")
+    await refresh_active_servers()
+
     server = await asyncio.start_server(handle_client, host, port)
 
     addr = server.sockets[0].getsockname()
@@ -202,10 +268,19 @@ async def main(host, port):
 
 
 if __name__ == "__main__":
-    LB_HOST = "0.0.0.0"  # Listen on all interfaces for LAN access
-    LB_PORT = 8080       # The single public-facing port
+    parser = argparse.ArgumentParser(description="AsyncIO Load Balancer")
+    parser.add_argument("--host", default="0.0.0.0", help="Host to bind the load balancer to (use 0.0.0.0 for LAN)")
+    parser.add_argument("--port", type=int, default=8080, help="Port for the load balancer to listen on")
+    parser.add_argument(
+        "--algorithm",
+        choices=["auto", "round-robin", "least-connections"],
+        default="auto",
+        help="Scheduling algorithm to use (auto picks round-robin when counts are even, least-connections when imbalanced)"
+    )
+
+    args = parser.parse_args()
 
     try:
-        asyncio.run(main(LB_HOST, LB_PORT))
+        asyncio.run(main(args.host, args.port, args.algorithm))
     except KeyboardInterrupt:
         print("\nShutting down Load Balancer...")
