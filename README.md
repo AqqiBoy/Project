@@ -82,7 +82,7 @@ Open your **fourth terminal**.
 
 **Run the client for the first time:**
 ```sh
-python src/client.py --host 127.0.0.1 --port 8080
+python client.py --host 127.0.0.1 --port 8080
 ```
 
 **Expected Output (Client - 1st run):**
