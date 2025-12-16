@@ -1,6 +1,5 @@
 import asyncio
 import argparse
-import sys
 
 async def tcp_client(host, port):
     """

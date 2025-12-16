@@ -39,8 +39,6 @@ async def main(name, host, port):
     """
     Starts the backend TCP server.
     """
-    loop = asyncio.get_running_loop()
-    
     # Pass server_name directly to the handler
     async def server_handler(reader, writer):
         await handle_connection(reader, writer, name)
