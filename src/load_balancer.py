@@ -5,13 +5,9 @@ import asyncio
 # PHASE 1: CORE DATA STRUCTURES
 # ============================================================ 
 
-# Use 127.0.0.1 for local testing.
-# In a real LAN environment, replace with private IPs like:
-# ('192.168.1.11', 8888), ('192.168.1.12', 8888)
-SERVER_POOL = [
-    ('127.0.0.1', 8881),
-    ('127.0.0.1', 8882),
-]
+# Define a broader range of potential servers (B1 to B10)
+# The Load Balancer will check these ports to see who is alive.
+SERVER_POOL = [('127.0.0.1', 8881 + i) for i in range(10)]
 
 HEALTH_CHECK_INTERVAL = 5  # seconds
 WAIT_FOR_BACKEND_TIMEOUT = 30  # seconds to wait for a backend to become healthy
@@ -21,21 +17,18 @@ WAIT_FOR_BACKEND_TIMEOUT = 30  # seconds to wait for a backend to become healthy
 # ============================================================ 
 
 # PHASE 2: ACTIVE_SERVERS will be managed by health checks
-# Example: ACTIVE_SERVERS = [('127.0.0.1', 8881)]
 ACTIVE_SERVERS = [] 
 active_servers_lock = asyncio.Lock()
 
 # PHASE 2: CONNECTION_COUNT for least-connections scheduling
-# Example: CONNECTION_COUNT = {('127.0.0.1', 8881): 5}
 CONNECTION_COUNT = {server: 0 for server in SERVER_POOL}
 
 # PHASE 3: SESSION_MAP for sticky sessions
-# Example: SESSION_MAP = {'<client_ip>:<client_port>': '<backend_addr>'}
 SESSION_MAP = {}
 
 # Scheduler selection
-SCHEDULING_ALGORITHM = "auto"  # "auto", "round-robin", or "least-connections"
-round_robin_index = 0  # shared index used for round-robin and tie-breaking
+SCHEDULING_ALGORITHM = "auto"
+round_robin_index = 0
 
 
 async def check_server_health(server):
@@ -52,8 +45,7 @@ async def check_server_health(server):
         return True
     except (asyncio.TimeoutError, ConnectionRefusedError):
         return False
-    except Exception as e:
-        print(f"LB: Error checking health of {server}: {e}")
+    except Exception:
         return False
 
 
@@ -63,22 +55,29 @@ async def refresh_active_servers():
     """
     global ACTIVE_SERVERS
     healthy_servers = []
+    
+    # Check all potential servers
     for server in SERVER_POOL:
         is_healthy = await check_server_health(server)
         if is_healthy:
             healthy_servers.append(server)
-            print(f"LB: Server {server} is healthy.")
-        else:
-            print(f"LB: Server {server} is unhealthy.")
-        # Reset connection counts for unhealthy servers to avoid stale skew.
+            
         if not is_healthy:
             CONNECTION_COUNT[server] = 0
         else:
             CONNECTION_COUNT.setdefault(server, 0)
 
+    # Logging Logic
+    if not healthy_servers:
+        print("LB: [WARNING] No backend servers are currently active/healthy.")
+    else:
+        print(f"LB: --- Health Check Passed ({len(healthy_servers)} active) ---")
+        for server in healthy_servers:
+            host, port = server
+            print(f"LB: [ACTIVE] Server {host}:{port} is healthy.")
+
     async with active_servers_lock:
         ACTIVE_SERVERS = healthy_servers
-        print(f"LB: Active servers updated: {ACTIVE_SERVERS}")
 
 
 async def perform_health_checks():
@@ -282,6 +281,7 @@ async def main(host, port, algorithm):
     SCHEDULING_ALGORITHM = algorithm
 
     print(f"LB: Initializing with algorithm={SCHEDULING_ALGORITHM}")
+    print(f"LB: Load Balancer Started on {host}:{port}")
     await refresh_active_servers()
 
     server = await asyncio.start_server(handle_client, host, port)
