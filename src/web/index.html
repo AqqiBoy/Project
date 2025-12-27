@@ -1,0 +1,75 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Load Balancer Dashboard</title>
+    <link rel="stylesheet" href="styles.css" />
+  </head>
+  <body>
+    <div class="ambient"></div>
+    <header class="hero">
+      <div class="title-block">
+        <p class="eyebrow">Distributed Systems</p>
+        <h1>Load Balancer Dashboard</h1>
+        <p class="subtitle">
+          Live snapshot of backend health, routing strategy, and connection load.
+        </p>
+      </div>
+      <div class="status-pill">
+        <span class="dot" id="status-dot"></span>
+        <span id="status-text">Checking status...</span>
+      </div>
+    </header>
+
+    <main class="grid">
+      <section class="panel metrics" style="--delay: 0s">
+        <h2>Key Metrics</h2>
+        <div class="metric-grid">
+          <div class="metric">
+            <span class="metric-label">Algorithm</span>
+            <span class="metric-value" id="metric-algorithm">-</span>
+          </div>
+          <div class="metric">
+            <span class="metric-label">Sticky Key</span>
+            <span class="metric-value" id="metric-sticky">-</span>
+          </div>
+          <div class="metric">
+            <span class="metric-label">Active Backends</span>
+            <span class="metric-value" id="metric-active">-</span>
+          </div>
+          <div class="metric">
+            <span class="metric-label">Sessions</span>
+            <span class="metric-value" id="metric-sessions">-</span>
+          </div>
+          <div class="metric">
+            <span class="metric-label">Uptime</span>
+            <span class="metric-value" id="metric-uptime">-</span>
+          </div>
+        </div>
+      </section>
+
+      <section class="panel backends" style="--delay: 0.05s">
+        <div class="panel-header">
+          <h2>Backend Pool</h2>
+          <span class="panel-meta" id="backend-summary">-</span>
+        </div>
+        <div class="backend-list" id="backend-list"></div>
+      </section>
+
+      <section class="panel events" style="--delay: 0.1s">
+        <div class="panel-header">
+          <h2>Recent Events</h2>
+          <span class="panel-meta" id="event-summary">-</span>
+        </div>
+        <div class="event-list" id="event-list"></div>
+      </section>
+    </main>
+
+    <footer class="footer">
+      <span id="updated-at">Waiting for updates...</span>
+    </footer>
+
+    <script src="app.js"></script>
+  </body>
+</html>

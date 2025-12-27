@@ -1,8 +1,13 @@
 import argparse
 import asyncio
+import json
 import logging
+import time
+from collections import deque
 from dataclasses import dataclass
-from typing import Dict, List, Optional, Sequence, Set, Tuple
+from datetime import datetime
+from pathlib import Path
+from typing import Deque, Dict, List, Optional, Sequence, Set, Tuple
 
 Backend = Tuple[str, int]
 
@@ -52,12 +57,19 @@ class LoadBalancerConfig:
     wait_for_backend_timeout: float
     health_check_timeout: float
     sticky_key: str
+    http_host: str
+    http_port: int
 
 
 class LoadBalancer:
     def __init__(self, config: LoadBalancerConfig, logger: logging.Logger) -> None:
         self._config = config
         self._logger = logger
+
+        self._static_dir = Path(__file__).resolve().parent / "web"
+        self._start_time = time.monotonic()
+        self._events: Deque[Dict[str, str]] = deque(maxlen=200)
+        self._events_lock = asyncio.Lock()
 
         self._server_pool: List[Backend] = list(config.backends)
         self._active_servers: List[Backend] = []
@@ -69,6 +81,15 @@ class LoadBalancer:
         self._session_map_lock = asyncio.Lock()
 
         self._round_robin_index = 0
+
+    async def _record_event(self, level: str, message: str) -> None:
+        event = {
+            "time": datetime.now().isoformat(timespec="seconds"),
+            "level": level,
+            "message": message,
+        }
+        async with self._events_lock:
+            self._events.append(event)
 
     async def check_server_health(self, server: Backend) -> bool:
         host, port = server
@@ -101,9 +122,12 @@ class LoadBalancer:
                 self._connection_count[server] = 0
 
         async with self._active_servers_lock:
+            previous = list(self._active_servers)
             self._active_servers = healthy
 
         self._logger.info("Active backends: %s", healthy)
+        if previous != healthy:
+            await self._record_event("INFO", f"Active backends updated: {healthy}")
 
     async def perform_health_checks(self) -> None:
         while True:
@@ -181,6 +205,7 @@ class LoadBalancer:
         client_addr = client_writer.get_extra_info("peername")
         client_key = self._client_key(client_addr)
         self._logger.info("Accepted client %s (key=%s)", client_addr, client_key)
+        await self._record_event("INFO", f"Client connected: {client_addr}")
 
         tried_servers: Set[Backend] = set()
         selected_server: Optional[Backend] = None
@@ -195,6 +220,7 @@ class LoadBalancer:
                     selected_server = sticky_target
                     selected_algo = "sticky"
                     self._logger.info("Sticky route %s -> %s", client_key, selected_server)
+                    await self._record_event("INFO", f"Sticky route: {client_key} -> {selected_server}")
                 else:
                     self._logger.warning(
                         "Sticky backend %s is not active; falling back to scheduler", sticky_target
@@ -208,6 +234,7 @@ class LoadBalancer:
                 selection = await self.wait_for_backend(self._config.wait_for_backend_timeout, tried_servers)
                 if not selection:
                     self._logger.error("No backend recovered before timeout; closing client %s", client_addr)
+                    await self._record_event("ERROR", f"No backend available for client {client_addr}")
                     client_writer.close()
                     await client_writer.wait_closed()
                     async with self._session_map_lock:
@@ -225,6 +252,10 @@ class LoadBalancer:
             self._logger.info(
                 "Routing client %s -> %s:%s (%s)", client_addr, backend_host, backend_port, selected_algo
             )
+            await self._record_event(
+                "INFO",
+                f"Routing {client_addr} -> {backend_host}:{backend_port} ({selected_algo})",
+            )
 
             async with self._session_map_lock:
                 self._session_map[client_key] = selected_server
@@ -238,9 +269,11 @@ class LoadBalancer:
                 self._logger.debug("Backend %s:%s connections=%s", backend_host, backend_port, current)
             except ConnectionRefusedError:
                 self._logger.warning("Backend refused connection %s:%s; trying next", backend_host, backend_port)
+                await self._record_event("WARNING", f"Backend refused: {backend_host}:{backend_port}")
                 backend_reader, backend_writer = None, None
             except Exception:
                 self._logger.exception("Failed connecting to backend %s:%s; trying next", backend_host, backend_port)
+                await self._record_event("ERROR", f"Backend connect failed: {backend_host}:{backend_port}")
                 backend_reader, backend_writer = None, None
 
             if backend_reader is None or backend_writer is None:
@@ -253,6 +286,7 @@ class LoadBalancer:
                     selection = await self.wait_for_backend(self._config.wait_for_backend_timeout, tried_servers)
                 if not selection:
                     self._logger.error("Timeout waiting for backend; closing client %s", client_addr)
+                    await self._record_event("ERROR", f"Backend timeout for client {client_addr}")
                     break
                 selected_server, selected_algo = selection
                 continue
@@ -274,6 +308,10 @@ class LoadBalancer:
             await asyncio.gather(client_to_backend, return_exceptions=True)
             self._logger.warning(
                 "Backend %s:%s closed for client %s; attempting failover", backend_host, backend_port, client_addr
+            )
+            await self._record_event(
+                "WARNING",
+                f"Backend closed {backend_host}:{backend_port}; failover for client {client_addr}",
             )
 
             if backend_writer:
@@ -297,6 +335,7 @@ class LoadBalancer:
                 selection = await self.wait_for_backend(self._config.wait_for_backend_timeout, tried_servers)
             if not selection:
                 self._logger.error("Timeout waiting for backend during failover; closing client %s", client_addr)
+                await self._record_event("ERROR", f"Failover timeout for client {client_addr}")
                 selected_server = None
             else:
                 selected_server, selected_algo = selection
@@ -313,6 +352,125 @@ class LoadBalancer:
         client_writer.close()
         await client_writer.wait_closed()
         self._logger.info("Closed client %s (sticky session retained for key=%s)", client_addr, client_key)
+        await self._record_event("INFO", f"Client closed: {client_addr}")
+
+    async def _status_payload(self) -> Dict[str, object]:
+        async with self._active_servers_lock:
+            active_servers = list(self._active_servers)
+        async with self._session_map_lock:
+            session_count = len(self._session_map)
+        async with self._events_lock:
+            events = list(self._events)
+
+        active_set = set(active_servers)
+        backends = []
+        for host, port in self._server_pool:
+            backends.append(
+                {
+                    "host": host,
+                    "port": port,
+                    "active": (host, port) in active_set,
+                    "connections": self._connection_count.get((host, port), 0),
+                }
+            )
+
+        return {
+            "algorithm": self._config.algorithm,
+            "sticky_key": self._config.sticky_key,
+            "total_backends": len(self._server_pool),
+            "active_backends": len(active_servers),
+            "backends": backends,
+            "session_count": session_count,
+            "uptime_seconds": int(time.monotonic() - self._start_time),
+            "events": events,
+        }
+
+    async def _send_response(
+        self, writer: asyncio.StreamWriter, status: int, reason: str, body: bytes, content_type: str
+    ) -> None:
+        headers = [
+            f"HTTP/1.1 {status} {reason}",
+            f"Content-Length: {len(body)}",
+            f"Content-Type: {content_type}",
+            "Cache-Control: no-store",
+            "Connection: close",
+            "",
+            "",
+        ]
+        writer.write("\r\n".join(headers).encode("utf-8") + body)
+        await writer.drain()
+        writer.close()
+        await writer.wait_closed()
+
+    async def handle_http(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+        try:
+            data = await asyncio.wait_for(reader.readuntil(b"\r\n\r\n"), timeout=2.0)
+        except asyncio.TimeoutError:
+            writer.close()
+            await writer.wait_closed()
+            return
+        except asyncio.IncompleteReadError:
+            writer.close()
+            await writer.wait_closed()
+            return
+        except asyncio.LimitOverrunError:
+            await self._send_response(
+                writer,
+                431,
+                "Request Header Fields Too Large",
+                b"Request header too large.",
+                "text/plain; charset=utf-8",
+            )
+            return
+
+        try:
+            request_line = data.split(b"\r\n", 1)[0].decode("iso-8859-1")
+            method, target, _version = request_line.split()
+        except ValueError:
+            await self._send_response(
+                writer, 400, "Bad Request", b"Invalid request line.", "text/plain; charset=utf-8"
+            )
+            return
+
+        if method.upper() != "GET":
+            await self._send_response(
+                writer, 405, "Method Not Allowed", b"Only GET is supported.", "text/plain; charset=utf-8"
+            )
+            return
+
+        path = target.split("?", 1)[0]
+        if path == "/api/status":
+            payload = await self._status_payload()
+            body = json.dumps(payload, separators=(",", ":")).encode("utf-8")
+            await self._send_response(writer, 200, "OK", body, "application/json; charset=utf-8")
+            return
+
+        static_map = {
+            "/": "index.html",
+            "/app.js": "app.js",
+            "/styles.css": "styles.css",
+        }
+        filename = static_map.get(path)
+        if not filename:
+            await self._send_response(writer, 404, "Not Found", b"Not Found.", "text/plain; charset=utf-8")
+            return
+
+        file_path = self._static_dir / filename
+        try:
+            body = file_path.read_bytes()
+        except FileNotFoundError:
+            await self._send_response(writer, 404, "Not Found", b"Not Found.", "text/plain; charset=utf-8")
+            return
+
+        content_type = "text/plain; charset=utf-8"
+        if filename.endswith(".html"):
+            content_type = "text/html; charset=utf-8"
+        elif filename.endswith(".css"):
+            content_type = "text/css; charset=utf-8"
+        elif filename.endswith(".js"):
+            content_type = "application/javascript; charset=utf-8"
+
+        await self._send_response(writer, 200, "OK", body, content_type)
 
     async def serve(self) -> None:
         await self.refresh_active_servers()
@@ -322,13 +480,37 @@ class LoadBalancer:
         listen_addrs = ", ".join(str(sock.getsockname()) for sock in sockets)
         self._logger.info("Load balancer listening on %s", listen_addrs)
 
+        http_server: Optional[asyncio.base_events.Server] = None
+        if self._config.http_port > 0:
+            http_server = await asyncio.start_server(
+                self.handle_http, self._config.http_host, self._config.http_port
+            )
+            http_sockets = http_server.sockets or []
+            http_listen = ", ".join(str(sock.getsockname()) for sock in http_sockets)
+            self._logger.info("Dashboard listening on %s", http_listen)
+            await self._record_event("INFO", f"Dashboard online at {http_listen}")
+
         health_task = asyncio.create_task(self.perform_health_checks())
+        server_task = asyncio.create_task(server.serve_forever())
+        http_task = asyncio.create_task(http_server.serve_forever()) if http_server else None
         try:
-            async with server:
-                await server.serve_forever()
+            tasks = [server_task]
+            if http_task:
+                tasks.append(http_task)
+            await asyncio.gather(*tasks)
         finally:
             health_task.cancel()
             await asyncio.gather(health_task, return_exceptions=True)
+            server_task.cancel()
+            await asyncio.gather(server_task, return_exceptions=True)
+            server.close()
+            await server.wait_closed()
+            if http_task:
+                http_task.cancel()
+                await asyncio.gather(http_task, return_exceptions=True)
+            if http_server:
+                http_server.close()
+                await http_server.wait_closed()
 
 
 def main() -> None:
@@ -377,6 +559,17 @@ def main() -> None:
         default="INFO",
         help="Logging verbosity",
     )
+    parser.add_argument(
+        "--http-host",
+        default="0.0.0.0",
+        help="Host to bind the dashboard HTTP server to (set --http-port 0 to disable)",
+    )
+    parser.add_argument(
+        "--http-port",
+        type=int,
+        default=8081,
+        help="Port for the dashboard HTTP server (0 to disable)",
+    )
 
     args = parser.parse_args()
     configure_logging(args.log_level)
@@ -391,6 +584,8 @@ def main() -> None:
         wait_for_backend_timeout=args.wait_for_backend_timeout,
         health_check_timeout=args.health_check_timeout,
         sticky_key=args.sticky_key,
+        http_host=args.http_host,
+        http_port=args.http_port,
     )
 
     logger.info(

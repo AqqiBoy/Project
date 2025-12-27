@@ -41,7 +41,7 @@ python src/server.py --name B2 --host 127.0.0.1 --port 8882
 ### Terminal 3: Load Balancer
 
 ```sh
-python src/load_balancer.py --host 127.0.0.1 --port 8080 --backends 127.0.0.1:8881,127.0.0.1:8882 --algorithm auto
+python src/load_balancer.py --host 127.0.0.1 --port 8080 --backends 127.0.0.1:8881,127.0.0.1:8882 --algorithm auto --http-port 8081
 ```
 
 ### Terminal 4: Client
@@ -49,6 +49,10 @@ python src/load_balancer.py --host 127.0.0.1 --port 8080 --backends 127.0.0.1:88
 ```sh
 python src/client.py --host 127.0.0.1 --port 8080
 ```
+
+### Dashboard (Browser)
+
+Open: `http://127.0.0.1:8081`
 
 ## LAN Setup
 
@@ -62,7 +66,7 @@ python src/server.py --name B2 --host 0.0.0.0 --port 8882
 2. Start the load balancer on its machine and point it at backend LAN IPs:
 
 ```sh
-python src/load_balancer.py --host 0.0.0.0 --port 8080 --backends 192.168.1.11:8881,192.168.1.12:8882 --algorithm auto
+python src/load_balancer.py --host 0.0.0.0 --port 8080 --backends 192.168.1.11:8881,192.168.1.12:8882 --algorithm auto --http-port 8081
 ```
 
 3. Run the client from any machine on the LAN and connect to the load balancer IP:
@@ -71,7 +75,15 @@ python src/load_balancer.py --host 0.0.0.0 --port 8080 --backends 192.168.1.11:8
 python src/client.py --host 192.168.1.10 --port 8080
 ```
 
+4. Open the dashboard from any LAN machine:
+
+```
+http://192.168.1.10:8081
+```
+
 Make sure firewalls allow TCP traffic to the backend ports (e.g. `8881`, `8882`) and the load balancer port (e.g. `8080`).
+
+Also allow the dashboard HTTP port (default `8081`).
 
 ## Configuration
 
@@ -80,6 +92,7 @@ Make sure firewalls allow TCP traffic to the backend ports (e.g. `8881`, `8882`)
 - `--sticky-key`: `ip` (default) or `ip-port`
 - `--health-check-interval`, `--health-check-timeout`, `--wait-for-backend-timeout`
 - `--log-level`: `DEBUG` | `INFO` | `WARNING` | `ERROR`
+- `--http-host`, `--http-port` (set `--http-port 0` to disable the dashboard)
 
 ## Sticky Sessions
 
@@ -87,4 +100,3 @@ Sticky sessions are applied first when a mapping exists:
 
 - Default behavior uses the client **IP address** as the key (`--sticky-key ip`).
 - Use `--sticky-key ip-port` if you want stickiness per (IP, port) instead.
-
