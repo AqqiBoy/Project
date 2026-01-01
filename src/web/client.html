@@ -3,22 +3,22 @@
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>Load Balancer Dashboard</title>
+    <title>Web Client</title>
     <link rel="stylesheet" href="styles.css" />
   </head>
   <body>
     <div class="ambient"></div>
     <header class="hero">
       <div class="title-block">
-        <p class="eyebrow">Distributed Systems</p>
-        <h1>Load Balancer Dashboard</h1>
+        <p class="eyebrow">Interactive Client</p>
+        <h1>Web Client</h1>
         <p class="subtitle">
-          Live snapshot of backend health, routing strategy, and connection load.
+          Send messages through the load balancer and view backend responses in real time.
         </p>
         <nav class="nav">
-          <a class="nav-link" href="/" aria-current="page">Dashboard</a>
+          <a class="nav-link" href="/">Dashboard</a>
           <a class="nav-link" href="/server.html">Servers</a>
-          <a class="nav-link" href="/client.html">Client</a>
+          <a class="nav-link" href="/client.html" aria-current="page">Client</a>
         </nav>
       </div>
       <div class="status-pill">
@@ -27,9 +27,27 @@
       </div>
     </header>
 
-    <main class="grid">
-      <section class="panel metrics" style="--delay: 0s">
-        <h2>Key Metrics</h2>
+    <main class="grid grid-two">
+      <section class="panel client-panel" style="--delay: 0s">
+        <div class="panel-header">
+          <h2>Message Console</h2>
+          <span class="panel-meta" id="client-id">Client: -</span>
+        </div>
+        <form class="client-form" id="client-form">
+          <input
+            class="client-input"
+            id="client-message"
+            type="text"
+            placeholder="Type a message to send through the load balancer"
+            autocomplete="off"
+          />
+          <button class="client-button" id="client-send" type="submit">Send</button>
+        </form>
+        <div class="message-list" id="message-list"></div>
+      </section>
+
+      <section class="panel metrics" style="--delay: 0.05s">
+        <h2>Load Balancer Status</h2>
         <div class="metric-grid">
           <div class="metric">
             <span class="metric-label">Algorithm</span>
@@ -44,30 +62,10 @@
             <span class="metric-value" id="metric-active">-</span>
           </div>
           <div class="metric">
-            <span class="metric-label">Sessions</span>
-            <span class="metric-value" id="metric-sessions">-</span>
-          </div>
-          <div class="metric">
             <span class="metric-label">Uptime</span>
             <span class="metric-value" id="metric-uptime">-</span>
           </div>
         </div>
-      </section>
-
-      <section class="panel backends" style="--delay: 0.05s">
-        <div class="panel-header">
-          <h2>Backend Pool</h2>
-          <span class="panel-meta" id="backend-summary">-</span>
-        </div>
-        <div class="backend-list" id="backend-list"></div>
-      </section>
-
-      <section class="panel events" style="--delay: 0.1s">
-        <div class="panel-header">
-          <h2>Recent Events</h2>
-          <span class="panel-meta" id="event-summary">-</span>
-        </div>
-        <div class="event-list" id="event-list"></div>
       </section>
     </main>
 
@@ -75,6 +73,6 @@
       <span id="updated-at">Waiting for updates...</span>
     </footer>
 
-    <script src="app.js"></script>
+    <script src="client.js"></script>
   </body>
 </html>

@@ -38,6 +38,11 @@ python src/server.py --name B1 --host 127.0.0.1 --port 8881
 python src/server.py --name B2 --host 127.0.0.1 --port 8882
 ```
 
+By default, each backend also exposes a status endpoint on `port + 1000`:
+
+- `http://127.0.0.1:9881/status`
+- `http://127.0.0.1:9882/status`
+
 ### Terminal 3: Load Balancer
 
 ```sh
@@ -53,6 +58,11 @@ python src/client.py --host 127.0.0.1 --port 8080
 ### Dashboard (Browser)
 
 Open: `http://127.0.0.1:8081`
+
+Additional pages:
+
+- Servers view: `http://127.0.0.1:8081/server.html`
+- Web client: `http://127.0.0.1:8081/client.html`
 
 ## LAN Setup
 
@@ -81,6 +91,13 @@ python src/client.py --host 192.168.1.10 --port 8080
 http://192.168.1.10:8081
 ```
 
+Server and client views:
+
+```
+http://192.168.1.10:8081/server.html
+http://192.168.1.10:8081/client.html
+```
+
 Make sure firewalls allow TCP traffic to the backend ports (e.g. `8881`, `8882`) and the load balancer port (e.g. `8080`).
 
 Also allow the dashboard HTTP port (default `8081`).
@@ -93,6 +110,12 @@ Also allow the dashboard HTTP port (default `8081`).
 - `--health-check-interval`, `--health-check-timeout`, `--wait-for-backend-timeout`
 - `--log-level`: `DEBUG` | `INFO` | `WARNING` | `ERROR`
 - `--http-host`, `--http-port` (set `--http-port 0` to disable the dashboard)
+- `--backend-status-port-offset` (load balancer uses backend `port + offset` for status)
+
+Backend status endpoint:
+
+- Each backend exposes `GET /status` on `port + 1000` by default (override with `--http-port`).
+- Backend flags: `--http-host`, `--http-port`, `--http-port-offset`
 
 ## Sticky Sessions
 

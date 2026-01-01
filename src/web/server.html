@@ -3,21 +3,21 @@
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>Load Balancer Dashboard</title>
+    <title>Server View</title>
     <link rel="stylesheet" href="styles.css" />
   </head>
   <body>
     <div class="ambient"></div>
     <header class="hero">
       <div class="title-block">
-        <p class="eyebrow">Distributed Systems</p>
-        <h1>Load Balancer Dashboard</h1>
+        <p class="eyebrow">Backend Fleet</p>
+        <h1>Server View</h1>
         <p class="subtitle">
-          Live snapshot of backend health, routing strategy, and connection load.
+          Health and connection load for every backend server in the pool.
         </p>
         <nav class="nav">
-          <a class="nav-link" href="/" aria-current="page">Dashboard</a>
-          <a class="nav-link" href="/server.html">Servers</a>
+          <a class="nav-link" href="/">Dashboard</a>
+          <a class="nav-link" href="/server.html" aria-current="page">Servers</a>
           <a class="nav-link" href="/client.html">Client</a>
         </nav>
       </div>
@@ -27,25 +27,21 @@
       </div>
     </header>
 
-    <main class="grid">
+    <main class="grid grid-two">
       <section class="panel metrics" style="--delay: 0s">
-        <h2>Key Metrics</h2>
+        <h2>Fleet Summary</h2>
         <div class="metric-grid">
-          <div class="metric">
-            <span class="metric-label">Algorithm</span>
-            <span class="metric-value" id="metric-algorithm">-</span>
-          </div>
-          <div class="metric">
-            <span class="metric-label">Sticky Key</span>
-            <span class="metric-value" id="metric-sticky">-</span>
-          </div>
           <div class="metric">
             <span class="metric-label">Active Backends</span>
             <span class="metric-value" id="metric-active">-</span>
           </div>
           <div class="metric">
-            <span class="metric-label">Sessions</span>
-            <span class="metric-value" id="metric-sessions">-</span>
+            <span class="metric-label">Total Connections</span>
+            <span class="metric-value" id="metric-connections">-</span>
+          </div>
+          <div class="metric">
+            <span class="metric-label">Algorithm</span>
+            <span class="metric-value" id="metric-algorithm">-</span>
           </div>
           <div class="metric">
             <span class="metric-label">Uptime</span>
@@ -61,20 +57,12 @@
         </div>
         <div class="backend-list" id="backend-list"></div>
       </section>
-
-      <section class="panel events" style="--delay: 0.1s">
-        <div class="panel-header">
-          <h2>Recent Events</h2>
-          <span class="panel-meta" id="event-summary">-</span>
-        </div>
-        <div class="event-list" id="event-list"></div>
-      </section>
     </main>
 
     <footer class="footer">
       <span id="updated-at">Waiting for updates...</span>
     </footer>
 
-    <script src="app.js"></script>
+    <script src="server.js"></script>
   </body>
 </html>

@@ -1,0 +1,72 @@
+FRONTEND CHEAT SHEET - Distributed Load Balancer Simulator
+
+What the frontend is
+- Static HTML/CSS/JS served by the load balancer on HTTP port (default 8081).
+- No React/Node build; a browser is enough.
+- TCP load balancing stays on port 8080; HTTP UI is separate.
+
+Pages (full frontend)
+1) Dashboard (/)
+   - Purpose: live overview of LB health and routing.
+   - Shows:
+     - Status pill (all up / degraded / all down / no backends)
+     - Key Metrics: Algorithm, Sticky Key, Active Backends, Sessions, Uptime
+     - Backend Pool: each backend active/down + LB connection count
+     - Recent Events: last routing/health/failover events
+
+2) Servers view (/server.html)
+   - Purpose: backend-focused monitoring.
+   - Shows:
+     - Active backends vs total
+     - Total connections across backends
+     - Algorithm + LB uptime
+     - Per backend:
+       - LB connections
+       - Backend uptime
+       - Backend message count
+
+3) Web Client (/client.html)
+   - Purpose: browser client for sending messages through LB.
+   - Shows:
+     - Message console (send + responses)
+     - LB metrics (Algorithm, Sticky Key, Active Backends, Uptime)
+
+How data flows (API)
+- GET /api/status (LB)
+  - Returns: algorithm, sticky_key, total_backends, active_backends,
+    backends[], session_count, uptime_seconds, events[].
+- GET /api/send?message=...&client_id=... (LB)
+  - Sends a message through the LB; returns response + latency.
+- GET /status (Backend)
+  - Runs on backend_port + 1000 by default.
+  - Returns name, uptime_seconds, message_count, active_connections.
+
+Key metrics explained
+- Algorithm: round-robin / least-connections / auto.
+- Sticky Key: ip or ip-port (how stickiness is computed).
+- Sessions: current sticky mappings in memory.
+- Active Backends: healthy backends vs configured total.
+- Uptime: how long LB has been running.
+- LB Connections: active client connections per backend (LB side).
+- Message Count: total messages processed by backend (backend side).
+
+LAN behavior
+- Any LAN machine can open the UI: http://LB_IP:8081
+- LB must bind to 0.0.0.0 and firewall must allow 8081.
+- Backends remain on their own machines; LB polls their /status.
+
+Multi-client support
+- Multiple browsers can open the UI concurrently.
+- Web client assigns a unique client_id per browser (localStorage).
+
+Known limits (good to mention)
+- No authentication (demo/LAN only).
+- Polling every 2 seconds (simple, reliable).
+- Sticky sessions and events are in-memory; reset on LB restart.
+
+Key files
+- LB HTTP + API: src/load_balancer.py
+- Backend status API: src/server.py
+- UI: src/web/index.html, src/web/server.html, src/web/client.html
+- JS: src/web/app.js, src/web/server.js, src/web/client.js
+- CSS: src/web/styles.css

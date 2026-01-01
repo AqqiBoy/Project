@@ -8,6 +8,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 from typing import Deque, Dict, List, Optional, Sequence, Set, Tuple
+from urllib.parse import parse_qs, urlsplit
 
 Backend = Tuple[str, int]
 
@@ -59,6 +60,7 @@ class LoadBalancerConfig:
     sticky_key: str
     http_host: str
     http_port: int
+    backend_status_port_offset: int
 
 
 class LoadBalancer:
@@ -70,6 +72,8 @@ class LoadBalancer:
         self._start_time = time.monotonic()
         self._events: Deque[Dict[str, str]] = deque(maxlen=200)
         self._events_lock = asyncio.Lock()
+        self._backend_details: Dict[Backend, Dict[str, object]] = {}
+        self._backend_details_lock = asyncio.Lock()
 
         self._server_pool: List[Backend] = list(config.backends)
         self._active_servers: List[Backend] = []
@@ -128,6 +132,65 @@ class LoadBalancer:
         self._logger.info("Active backends: %s", healthy)
         if previous != healthy:
             await self._record_event("INFO", f"Active backends updated: {healthy}")
+        await self.refresh_backend_details()
+
+    async def _fetch_backend_status(self, server: Backend) -> Optional[Dict[str, object]]:
+        host, port = server
+        status_port = port + self._config.backend_status_port_offset
+        request = (
+            f"GET /status HTTP/1.1\r\n"
+            f"Host: {host}\r\n"
+            "Connection: close\r\n"
+            "\r\n"
+        ).encode("utf-8")
+
+        try:
+            reader, writer = await asyncio.wait_for(
+                asyncio.open_connection(host, status_port),
+                timeout=self._config.health_check_timeout,
+            )
+            writer.write(request)
+            await writer.drain()
+            header_data = await asyncio.wait_for(reader.readuntil(b"\r\n\r\n"), timeout=self._config.health_check_timeout)
+            header_text = header_data.decode("iso-8859-1")
+            lines = header_text.split("\r\n")
+            status_line = lines[0]
+            if "200" not in status_line:
+                writer.close()
+                await writer.wait_closed()
+                return None
+
+            headers = {}
+            for line in lines[1:]:
+                if not line:
+                    continue
+                key, _, value = line.partition(":")
+                headers[key.strip().lower()] = value.strip()
+
+            content_length = int(headers.get("content-length", "0"))
+            body = await asyncio.wait_for(reader.readexactly(content_length), timeout=self._config.health_check_timeout)
+            writer.close()
+            await writer.wait_closed()
+            return json.loads(body.decode("utf-8"))
+        except (asyncio.TimeoutError, ConnectionRefusedError, json.JSONDecodeError, ValueError):
+            return None
+        except Exception:
+            self._logger.debug("Status fetch failed for %s:%s", host, status_port, exc_info=True)
+            return None
+
+    async def refresh_backend_details(self) -> None:
+        results = await asyncio.gather(
+            *(self._fetch_backend_status(server) for server in self._server_pool),
+            return_exceptions=False,
+        )
+
+        details: Dict[Backend, Dict[str, object]] = {}
+        for server, payload in zip(self._server_pool, results):
+            if payload:
+                details[server] = payload
+
+        async with self._backend_details_lock:
+            self._backend_details = details
 
     async def perform_health_checks(self) -> None:
         while True:
@@ -359,6 +422,8 @@ class LoadBalancer:
             active_servers = list(self._active_servers)
         async with self._session_map_lock:
             session_count = len(self._session_map)
+        async with self._backend_details_lock:
+            details = dict(self._backend_details)
         async with self._events_lock:
             events = list(self._events)
 
@@ -371,6 +436,7 @@ class LoadBalancer:
                     "port": port,
                     "active": (host, port) in active_set,
                     "connections": self._connection_count.get((host, port), 0),
+                    "details": details.get((host, port)),
                 }
             )
 
@@ -384,6 +450,35 @@ class LoadBalancer:
             "uptime_seconds": int(time.monotonic() - self._start_time),
             "events": events,
         }
+
+    def _lb_connect_host(self) -> str:
+        if self._config.host in ("0.0.0.0", "::", ""):
+            return "127.0.0.1"
+        return self._config.host
+
+    async def _send_message_via_lb(self, message: str, timeout: float = 3.0) -> Tuple[bool, str, int]:
+        host = self._lb_connect_host()
+        start = time.monotonic()
+        try:
+            reader, writer = await asyncio.wait_for(
+                asyncio.open_connection(host, self._config.port),
+                timeout=timeout,
+            )
+            writer.write(message.encode("utf-8") + b"\n")
+            await writer.drain()
+            data = await asyncio.wait_for(reader.read(200), timeout=timeout)
+            writer.close()
+            await writer.wait_closed()
+        except asyncio.TimeoutError:
+            return False, "Timed out waiting for backend response.", int((time.monotonic() - start) * 1000)
+        except Exception as exc:
+            return False, f"Failed to send message: {exc}", int((time.monotonic() - start) * 1000)
+
+        response = data.decode("utf-8", errors="replace").strip()
+        latency_ms = int((time.monotonic() - start) * 1000)
+        if not response:
+            return False, "Empty response from backend.", latency_ms
+        return True, response, latency_ms
 
     async def _send_response(
         self, writer: asyncio.StreamWriter, status: int, reason: str, body: bytes, content_type: str
@@ -438,16 +533,49 @@ class LoadBalancer:
             )
             return
 
-        path = target.split("?", 1)[0]
+        parsed = urlsplit(target)
+        path = parsed.path
+        query = parse_qs(parsed.query)
         if path == "/api/status":
             payload = await self._status_payload()
             body = json.dumps(payload, separators=(",", ":")).encode("utf-8")
             await self._send_response(writer, 200, "OK", body, "application/json; charset=utf-8")
             return
+        if path == "/api/send":
+            message = query.get("message", [""])[0]
+            client_id = query.get("client_id", ["unknown"])[0]
+            message = message.strip()
+            if not message:
+                payload = {"ok": False, "error": "Message is required."}
+                body = json.dumps(payload, separators=(",", ":")).encode("utf-8")
+                await self._send_response(writer, 400, "Bad Request", body, "application/json; charset=utf-8")
+                return
+            if len(message) > 256:
+                payload = {"ok": False, "error": "Message is too long (max 256 characters)."}
+                body = json.dumps(payload, separators=(",", ":")).encode("utf-8")
+                await self._send_response(writer, 413, "Payload Too Large", body, "application/json; charset=utf-8")
+                return
+
+            ok, response_text, latency_ms = await self._send_message_via_lb(message)
+            if ok:
+                payload = {"ok": True, "response": response_text, "latency_ms": latency_ms}
+                await self._record_event("INFO", f"Web client {client_id} -> {response_text}")
+                body = json.dumps(payload, separators=(",", ":")).encode("utf-8")
+                await self._send_response(writer, 200, "OK", body, "application/json; charset=utf-8")
+            else:
+                payload = {"ok": False, "error": response_text, "latency_ms": latency_ms}
+                await self._record_event("ERROR", f"Web client {client_id} failed: {response_text}")
+                body = json.dumps(payload, separators=(",", ":")).encode("utf-8")
+                await self._send_response(writer, 502, "Bad Gateway", body, "application/json; charset=utf-8")
+            return
 
         static_map = {
             "/": "index.html",
             "/app.js": "app.js",
+            "/server.html": "server.html",
+            "/server.js": "server.js",
+            "/client.html": "client.html",
+            "/client.js": "client.js",
             "/styles.css": "styles.css",
         }
         filename = static_map.get(path)
@@ -570,6 +698,12 @@ def main() -> None:
         default=8081,
         help="Port for the dashboard HTTP server (0 to disable)",
     )
+    parser.add_argument(
+        "--backend-status-port-offset",
+        type=int,
+        default=1000,
+        help="Offset to add to backend port for status HTTP port",
+    )
 
     args = parser.parse_args()
     configure_logging(args.log_level)
@@ -586,6 +720,7 @@ def main() -> None:
         sticky_key=args.sticky_key,
         http_host=args.http_host,
         http_port=args.http_port,
+        backend_status_port_offset=args.backend_status_port_offset,
     )
 
     logger.info(
