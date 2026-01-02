@@ -101,7 +101,7 @@ body::before {
   border-radius: 999px;
   border: 1px solid rgba(27, 122, 110, 0.25);
   background: rgba(27, 122, 110, 0.08);
-  font-size: 13px;
+  font-size: 14px;
   font-weight: 600;
 }
 
@@ -167,7 +167,7 @@ body::before {
 .panel h2 {
   margin: 0 0 16px;
   font-family: "Palatino Linotype", "Book Antiqua", "Palatino", serif;
-  font-size: 20px;
+  font-size: 22px;
 }
 
 .panel-header {
@@ -179,7 +179,7 @@ body::before {
 }
 
 .panel-meta {
-  font-size: 13px;
+  font-size: 14px;
   color: var(--muted);
 }
 
@@ -202,11 +202,12 @@ body::before {
 
 .metric-label {
   color: var(--muted);
-  font-size: 13px;
+  font-size: 14px;
 }
 
 .metric-value {
   font-weight: 700;
+  font-size: 16px;
 }
 
 .backend-list,
@@ -224,13 +225,21 @@ body::before {
   margin-bottom: 16px;
 }
 
+.client-controls {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 14px;
+  flex-wrap: wrap;
+}
+
 .client-input {
   flex: 1;
   padding: 12px 14px;
   border-radius: 12px;
   border: 1px solid var(--panel-border);
   background: rgba(255, 255, 255, 0.8);
-  font-size: 14px;
+  font-size: 15px;
 }
 
 .client-input:focus {
@@ -244,12 +253,30 @@ body::before {
   background: var(--accent);
   color: #ffffff;
   font-weight: 600;
+  font-size: 14px;
   cursor: pointer;
+}
+
+.client-button.secondary {
+  background: rgba(27, 122, 110, 0.15);
+  color: var(--accent-strong);
 }
 
 .client-button:disabled {
   background: rgba(27, 122, 110, 0.5);
   cursor: wait;
+}
+
+.client-status {
+  font-size: 13px;
+  text-transform: uppercase;
+  letter-spacing: 1px;
+  color: var(--warn);
+  font-weight: 600;
+}
+
+.client-status.connected {
+  color: var(--accent-strong);
 }
 
 .message-list {
@@ -270,7 +297,7 @@ body::before {
 }
 
 .message-meta {
-  font-size: 12px;
+  font-size: 13px;
   color: var(--muted);
   text-transform: uppercase;
   letter-spacing: 1px;
@@ -282,7 +309,7 @@ body::before {
 
 .message-response {
   color: var(--muted);
-  font-size: 13px;
+  font-size: 14px;
 }
 
 .backend-card,
@@ -308,7 +335,7 @@ body::before {
 .badge {
   padding: 4px 8px;
   border-radius: 999px;
-  font-size: 11px;
+  font-size: 12px;
   text-transform: uppercase;
   letter-spacing: 1px;
 }
@@ -327,14 +354,14 @@ body::before {
   display: flex;
   justify-content: space-between;
   color: var(--muted);
-  font-size: 13px;
+  font-size: 14px;
 }
 
 .backend-stats {
   display: grid;
   grid-template-columns: 1fr auto 1fr auto;
   gap: 6px 12px;
-  font-size: 12px;
+  font-size: 13px;
   color: var(--muted);
 }
 
@@ -346,13 +373,13 @@ body::before {
   display: flex;
   justify-content: space-between;
   font-weight: 600;
-  font-size: 13px;
+  font-size: 14px;
 }
 
 .event-level {
   text-transform: uppercase;
   letter-spacing: 1px;
-  font-size: 11px;
+  font-size: 12px;
 }
 
 .event-level.info {
@@ -369,7 +396,7 @@ body::before {
 
 .event-message {
   color: var(--muted);
-  font-size: 13px;
+  font-size: 14px;
   line-height: 1.4;
 }
 
@@ -378,7 +405,7 @@ body::before {
   z-index: 1;
   padding: 16px clamp(20px, 6vw, 80px) 32px;
   color: var(--muted);
-  font-size: 13px;
+  font-size: 14px;
 }
 
 @keyframes rise {

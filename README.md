@@ -64,6 +64,8 @@ Additional pages:
 - Servers view: `http://127.0.0.1:8081/server.html`
 - Web client: `http://127.0.0.1:8081/client.html`
 
+The web client keeps a persistent connection once you press **Connect** (idle connections close after the timeout).
+
 ## LAN Setup
 
 1. Start backend servers on their machines (bind to all interfaces):
@@ -111,6 +113,7 @@ Also allow the dashboard HTTP port (default `8081`).
 - `--log-level`: `DEBUG` | `INFO` | `WARNING` | `ERROR`
 - `--http-host`, `--http-port` (set `--http-port 0` to disable the dashboard)
 - `--backend-status-port-offset` (load balancer uses backend `port + offset` for status)
+- `--web-client-idle-timeout`, `--web-client-read-timeout`
 
 Backend status endpoint:
 

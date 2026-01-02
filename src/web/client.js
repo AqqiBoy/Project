@@ -2,6 +2,9 @@ const elements = {
   statusDot: document.getElementById("status-dot"),
   statusText: document.getElementById("status-text"),
   clientId: document.getElementById("client-id"),
+  statusText: document.getElementById("client-status"),
+  connectButton: document.getElementById("client-connect"),
+  disconnectButton: document.getElementById("client-disconnect"),
   form: document.getElementById("client-form"),
   input: document.getElementById("client-message"),
   sendButton: document.getElementById("client-send"),
@@ -20,6 +23,8 @@ if (!clientId) {
   localStorage.setItem(clientIdKey, clientId);
 }
 elements.clientId.textContent = `Client: ${clientId}`;
+
+let isConnected = false;
 
 function formatUptime(seconds) {
   const hrs = Math.floor(seconds / 3600);
@@ -92,6 +97,15 @@ function addMessageCard(entry) {
   elements.messageList.prepend(card);
 }
 
+function setConnectionState(connected, message) {
+  isConnected = connected;
+  elements.statusText.textContent = message;
+  elements.sendButton.disabled = !connected;
+  elements.connectButton.disabled = connected;
+  elements.disconnectButton.disabled = !connected;
+  elements.statusText.classList.toggle("connected", connected);
+}
+
 async function fetchStatus() {
   const response = await fetch("/api/status", { cache: "no-store" });
   if (!response.ok) {
@@ -112,6 +126,28 @@ async function refreshStatus() {
   }
 }
 
+async function connectClient() {
+  const response = await fetch(`/api/connect?client_id=${encodeURIComponent(clientId)}`, {
+    cache: "no-store",
+  });
+  const payload = await response.json();
+  if (!response.ok || !payload.ok) {
+    throw new Error(payload.error || payload.message || "Connect failed.");
+  }
+  setConnectionState(true, "Connected");
+}
+
+async function disconnectClient() {
+  const response = await fetch(`/api/disconnect?client_id=${encodeURIComponent(clientId)}`, {
+    cache: "no-store",
+  });
+  const payload = await response.json();
+  if (!response.ok || !payload.ok) {
+    throw new Error(payload.error || payload.message || "Disconnect failed.");
+  }
+  setConnectionState(false, "Disconnected");
+}
+
 async function sendMessage(message) {
   const url = `/api/send?message=${encodeURIComponent(message)}&client_id=${encodeURIComponent(clientId)}`;
   const response = await fetch(url, { cache: "no-store" });
@@ -126,6 +162,15 @@ elements.form.addEventListener("submit", async (event) => {
   event.preventDefault();
   const message = elements.input.value.trim();
   if (!message) {
+    return;
+  }
+  if (!isConnected) {
+    addMessageCard({
+      time: new Date().toLocaleTimeString(),
+      status: "Disconnected",
+      message,
+      response: "Connect the client before sending messages.",
+    });
     return;
   }
 
@@ -157,5 +202,37 @@ elements.form.addEventListener("submit", async (event) => {
   }
 });
 
+elements.connectButton.addEventListener("click", async () => {
+  setConnectionState(false, "Connecting...");
+  try {
+    await connectClient();
+  } catch (error) {
+    setConnectionState(false, error.message || "Connect failed.");
+  }
+});
+
+elements.disconnectButton.addEventListener("click", async () => {
+  setConnectionState(false, "Disconnecting...");
+  try {
+    await disconnectClient();
+  } catch (error) {
+    setConnectionState(false, error.message || "Disconnect failed.");
+  }
+});
+
+setConnectionState(false, "Connecting...");
+connectClient().catch((error) => {
+  setConnectionState(false, error.message || "Connect failed.");
+});
+
 refreshStatus();
 setInterval(refreshStatus, 2000);
+
+setInterval(() => {
+  if (!isConnected) {
+    return;
+  }
+  connectClient().catch(() => {
+    setConnectionState(false, "Disconnected");
+  });
+}, 30000);

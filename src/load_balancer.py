@@ -61,6 +61,17 @@ class LoadBalancerConfig:
     http_host: str
     http_port: int
     backend_status_port_offset: int
+    web_client_idle_timeout: float
+    web_client_read_timeout: float
+
+
+@dataclass
+class WebClientSession:
+    reader: asyncio.StreamReader
+    writer: asyncio.StreamWriter
+    created_at: float
+    last_activity: float
+    lock: asyncio.Lock
 
 
 class LoadBalancer:
@@ -74,6 +85,8 @@ class LoadBalancer:
         self._events_lock = asyncio.Lock()
         self._backend_details: Dict[Backend, Dict[str, object]] = {}
         self._backend_details_lock = asyncio.Lock()
+        self._web_clients: Dict[str, WebClientSession] = {}
+        self._web_clients_lock = asyncio.Lock()
 
         self._server_pool: List[Backend] = list(config.backends)
         self._active_servers: List[Backend] = []
@@ -456,29 +469,112 @@ class LoadBalancer:
             return "127.0.0.1"
         return self._config.host
 
-    async def _send_message_via_lb(self, message: str, timeout: float = 3.0) -> Tuple[bool, str, int]:
+    async def _close_web_client_session(self, client_id: str, reason: str) -> None:
+        async with self._web_clients_lock:
+            session = self._web_clients.pop(client_id, None)
+        if not session:
+            return
+        if not session.writer.is_closing():
+            session.writer.close()
+            await session.writer.wait_closed()
+        await self._record_event("INFO", f"Web client {client_id} disconnected ({reason})")
+
+    async def _get_web_client_session(self, client_id: str) -> Optional[WebClientSession]:
+        async with self._web_clients_lock:
+            session = self._web_clients.get(client_id)
+        if not session:
+            return None
+        if session.writer.is_closing() or session.reader.at_eof():
+            await self._close_web_client_session(client_id, "connection closed")
+            return None
+        return session
+
+    async def _open_web_client_session(self, client_id: str) -> Tuple[bool, str]:
+        existing = await self._get_web_client_session(client_id)
+        if existing:
+            existing.last_activity = time.monotonic()
+            return True, "Already connected."
+
         host = self._lb_connect_host()
-        start = time.monotonic()
         try:
             reader, writer = await asyncio.wait_for(
                 asyncio.open_connection(host, self._config.port),
-                timeout=timeout,
+                timeout=self._config.health_check_timeout,
             )
-            writer.write(message.encode("utf-8") + b"\n")
-            await writer.drain()
-            data = await asyncio.wait_for(reader.read(200), timeout=timeout)
-            writer.close()
-            await writer.wait_closed()
         except asyncio.TimeoutError:
-            return False, "Timed out waiting for backend response.", int((time.monotonic() - start) * 1000)
+            return False, "Timed out connecting to the load balancer."
         except Exception as exc:
-            return False, f"Failed to send message: {exc}", int((time.monotonic() - start) * 1000)
+            return False, f"Failed to connect to the load balancer: {exc}"
+
+        now = time.monotonic()
+        session = WebClientSession(
+            reader=reader,
+            writer=writer,
+            created_at=now,
+            last_activity=now,
+            lock=asyncio.Lock(),
+        )
+        async with self._web_clients_lock:
+            if client_id in self._web_clients:
+                session.writer.close()
+                await session.writer.wait_closed()
+                return True, "Already connected."
+            self._web_clients[client_id] = session
+        await self._record_event("INFO", f"Web client {client_id} connected")
+        return True, "Connected."
+
+    async def _send_via_web_client(self, client_id: str, message: str) -> Tuple[bool, str, int]:
+        session = await self._get_web_client_session(client_id)
+        if not session:
+            return False, "Web client is not connected.", 0
+
+        start = time.monotonic()
+        async with session.lock:
+            if session.writer.is_closing() or session.reader.at_eof():
+                await self._close_web_client_session(client_id, "connection closed")
+                return False, "Web client connection closed.", 0
+
+            session.last_activity = time.monotonic()
+            try:
+                session.writer.write(message.encode("utf-8") + b"\n")
+                await session.writer.drain()
+                data = await asyncio.wait_for(
+                    session.reader.readuntil(b"\n"),
+                    timeout=self._config.web_client_read_timeout,
+                )
+            except asyncio.LimitOverrunError:
+                data = await asyncio.wait_for(
+                    session.reader.read(200),
+                    timeout=self._config.web_client_read_timeout,
+                )
+            except (asyncio.TimeoutError, asyncio.IncompleteReadError):
+                await self._close_web_client_session(client_id, "response timeout")
+                return False, "Timed out waiting for backend response.", int((time.monotonic() - start) * 1000)
+            except Exception as exc:
+                await self._close_web_client_session(client_id, "send error")
+                return False, f"Failed to send message: {exc}", int((time.monotonic() - start) * 1000)
 
         response = data.decode("utf-8", errors="replace").strip()
         latency_ms = int((time.monotonic() - start) * 1000)
         if not response:
             return False, "Empty response from backend.", latency_ms
         return True, response, latency_ms
+
+    async def _reap_idle_web_clients(self) -> None:
+        while True:
+            await asyncio.sleep(5)
+            if self._config.web_client_idle_timeout <= 0:
+                continue
+            now = time.monotonic()
+            async with self._web_clients_lock:
+                stale = [
+                    client_id
+                    for client_id, session in self._web_clients.items()
+                    if session.writer.is_closing()
+                    or now - session.last_activity > self._config.web_client_idle_timeout
+                ]
+            for client_id in stale:
+                await self._close_web_client_session(client_id, "idle timeout")
 
     async def _send_response(
         self, writer: asyncio.StreamWriter, status: int, reason: str, body: bytes, content_type: str
@@ -541,10 +637,40 @@ class LoadBalancer:
             body = json.dumps(payload, separators=(",", ":")).encode("utf-8")
             await self._send_response(writer, 200, "OK", body, "application/json; charset=utf-8")
             return
+        if path == "/api/connect":
+            client_id = query.get("client_id", [""])[0].strip()
+            if not client_id:
+                payload = {"ok": False, "error": "client_id is required."}
+                body = json.dumps(payload, separators=(",", ":")).encode("utf-8")
+                await self._send_response(writer, 400, "Bad Request", body, "application/json; charset=utf-8")
+                return
+            ok, message = await self._open_web_client_session(client_id)
+            status = 200 if ok else 502
+            payload = {"ok": ok, "message": message}
+            body = json.dumps(payload, separators=(",", ":")).encode("utf-8")
+            await self._send_response(writer, status, "OK" if ok else "Bad Gateway", body, "application/json; charset=utf-8")
+            return
+        if path == "/api/disconnect":
+            client_id = query.get("client_id", [""])[0].strip()
+            if not client_id:
+                payload = {"ok": False, "error": "client_id is required."}
+                body = json.dumps(payload, separators=(",", ":")).encode("utf-8")
+                await self._send_response(writer, 400, "Bad Request", body, "application/json; charset=utf-8")
+                return
+            await self._close_web_client_session(client_id, "manual disconnect")
+            payload = {"ok": True, "message": "Disconnected."}
+            body = json.dumps(payload, separators=(",", ":")).encode("utf-8")
+            await self._send_response(writer, 200, "OK", body, "application/json; charset=utf-8")
+            return
         if path == "/api/send":
             message = query.get("message", [""])[0]
-            client_id = query.get("client_id", ["unknown"])[0]
+            client_id = query.get("client_id", [""])[0].strip()
             message = message.strip()
+            if not client_id:
+                payload = {"ok": False, "error": "client_id is required."}
+                body = json.dumps(payload, separators=(",", ":")).encode("utf-8")
+                await self._send_response(writer, 400, "Bad Request", body, "application/json; charset=utf-8")
+                return
             if not message:
                 payload = {"ok": False, "error": "Message is required."}
                 body = json.dumps(payload, separators=(",", ":")).encode("utf-8")
@@ -556,7 +682,7 @@ class LoadBalancer:
                 await self._send_response(writer, 413, "Payload Too Large", body, "application/json; charset=utf-8")
                 return
 
-            ok, response_text, latency_ms = await self._send_message_via_lb(message)
+            ok, response_text, latency_ms = await self._send_via_web_client(client_id, message)
             if ok:
                 payload = {"ok": True, "response": response_text, "latency_ms": latency_ms}
                 await self._record_event("INFO", f"Web client {client_id} -> {response_text}")
@@ -565,8 +691,9 @@ class LoadBalancer:
             else:
                 payload = {"ok": False, "error": response_text, "latency_ms": latency_ms}
                 await self._record_event("ERROR", f"Web client {client_id} failed: {response_text}")
+                status = 409 if response_text.startswith("Web client is not connected") else 502
                 body = json.dumps(payload, separators=(",", ":")).encode("utf-8")
-                await self._send_response(writer, 502, "Bad Gateway", body, "application/json; charset=utf-8")
+                await self._send_response(writer, status, "Bad Gateway", body, "application/json; charset=utf-8")
             return
 
         static_map = {
@@ -619,6 +746,7 @@ class LoadBalancer:
             await self._record_event("INFO", f"Dashboard online at {http_listen}")
 
         health_task = asyncio.create_task(self.perform_health_checks())
+        reap_task = asyncio.create_task(self._reap_idle_web_clients())
         server_task = asyncio.create_task(server.serve_forever())
         http_task = asyncio.create_task(http_server.serve_forever()) if http_server else None
         try:
@@ -629,6 +757,8 @@ class LoadBalancer:
         finally:
             health_task.cancel()
             await asyncio.gather(health_task, return_exceptions=True)
+            reap_task.cancel()
+            await asyncio.gather(reap_task, return_exceptions=True)
             server_task.cancel()
             await asyncio.gather(server_task, return_exceptions=True)
             server.close()
@@ -704,6 +834,18 @@ def main() -> None:
         default=1000,
         help="Offset to add to backend port for status HTTP port",
     )
+    parser.add_argument(
+        "--web-client-idle-timeout",
+        type=float,
+        default=120.0,
+        help="Seconds before an idle web client connection is closed",
+    )
+    parser.add_argument(
+        "--web-client-read-timeout",
+        type=float,
+        default=3.0,
+        help="Seconds to wait for backend response for web client",
+    )
 
     args = parser.parse_args()
     configure_logging(args.log_level)
@@ -721,6 +863,8 @@ def main() -> None:
         http_host=args.http_host,
         http_port=args.http_port,
         backend_status_port_offset=args.backend_status_port_offset,
+        web_client_idle_timeout=args.web_client_idle_timeout,
+        web_client_read_timeout=args.web_client_read_timeout,
     )
 
     logger.info(
